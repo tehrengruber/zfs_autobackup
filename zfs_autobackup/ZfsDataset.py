@@ -381,20 +381,30 @@ class ZfsDataset:
                                    readonly=True)
         return map(lambda fields: fields[1], output)
 
-    def is_hold(self):
+    def is_hold(self, by_guid=None):
         """did we hold this snapshot?"""
-        return self.zfs_node.hold_name in self.holds
+        if by_guid:
+            return (self.zfs_node.hold_name + "_" + by_guid) in self.holds
+        return any(hold_name.startswith(self.zfs_node.hold_name) for hold_name in self.holds)
 
-    def hold(self):
+    def hold(self, by_guid=None):
         """hold dataset"""
-        self.debug("holding")
-        self.zfs_node.run(["zfs", "hold", self.zfs_node.hold_name, self.name], valid_exitcodes=[0, 1])
+        hold_name = self.zfs_node.hold_name
+        if by_guid:
+            hold_name = hold_name + "_" + by_guid
 
-    def release(self):
+        self.debug("holding")
+        self.zfs_node.run(["zfs", "hold", hold_name, self.name], valid_exitcodes=[0, 1])
+
+    def release(self, by_guid=None):
         """release dataset"""
-        if self.zfs_node.readonly or self.is_hold():
+        hold_name = self.zfs_node.hold_name
+        if by_guid:
+            hold_name = hold_name + "_" + by_guid
+
+        if self.zfs_node.readonly or self.is_hold(by_guid):
             self.debug("releasing")
-            self.zfs_node.run(["zfs", "release", self.zfs_node.hold_name, self.name], valid_exitcodes=[0, 1])
+            self.zfs_node.run(["zfs", "release", hold_name, self.name], valid_exitcodes=[0, 1])
 
     @property
     def timestamp(self):
@@ -1006,7 +1016,7 @@ class ZfsDataset:
                 # never destroy common snapshot
             else:
                 target_snapshot = target_dataset.find_snapshot(source_snapshot)
-                if (source_snapshot in source_obsoletes) and (before_common or (target_snapshot not in target_keeps)):
+                if (source_snapshot in source_obsoletes) and (before_common or (target_snapshot not in target_keeps)) and not source_snapshot.is_hold():
                     source_snapshot.destroy()
 
         # on target: destroy everything thats obsolete, except common_snapshot
@@ -1190,17 +1200,19 @@ class ZfsDataset:
                 resume_token = None
 
                 # hold the new common snapshots and release the previous ones
+                target_guid = target_dataset.properties['guid']
                 if holds:
                     target_snapshot.hold()
-                    source_snapshot.hold()
+                    source_snapshot.hold(target_guid)
 
                 if prev_source_snapshot:
                     if holds:
-                        prev_source_snapshot.release()
+                        prev_source_snapshot.release(target_guid)
                         target_dataset.find_snapshot(prev_source_snapshot).release()
 
-                # we may now destroy the previous source snapshot if its obsolete
-                if prev_source_snapshot in source_obsoletes:
+                # we may now destroy the previous source snapshot if its obsolete and not hold
+                # by anyone
+                if prev_source_snapshot in source_obsoletes and not prev_source_snapshot.is_hold():
                     prev_source_snapshot.destroy()
 
                 # destroy the previous target snapshot if obsolete (usually this is only the common_snapshot,
